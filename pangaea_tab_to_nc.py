@@ -148,7 +148,7 @@ def save_PS_mastertrack_as_nc(
 """
 
 
-path_pstrack = "/mnt/d/walbr/Downloads/ps_track_raw/"
+path_pstrack = "/example_path/polarstern_track/"
 
 
 # Polarstern master track data:
