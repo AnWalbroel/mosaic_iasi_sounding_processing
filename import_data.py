@@ -1,5 +1,4 @@
 import numpy as np
-import netCDF4 as nc
 import datetime as dt
 import pandas as pd
 import xarray as xr
@@ -7,9 +6,6 @@ import pdb
 import os
 import glob
 import sys
-import warnings
-from met_tools import *
-from data_tools import *
 
 
 def import_iasi_nc(
@@ -65,6 +61,55 @@ def import_iasi_nc(
 
 	# also rename integrated water vapour variable:
 	DS = DS.rename({'integrated_water_vapor': 'iwv'})
+
+	return DS
+
+
+def import_iasi_step1(
+	path_data):
+
+	"""
+	Imports IASI step 1 data processed with manage_iasi.py that lie within the path given. The data will be 
+	returned as xarray dataset sorted by time. The second dimension 'n_points' will be truncated as far as possible. 
+	The initial size of this dimension was only a proxy to cover as many identified IASI pixels for one 
+	Polarstern track time step as possible.
+
+	Parameters:
+	-----------
+	path_data : str
+		Data path as string indicating the location of the processed IASI files. No subfolders will be searched.
+	"""
+
+	# identify files:
+	files = sorted(glob.glob(path_data + "*.nc"))
+	DS = xr.open_mfdataset(files, concat_dim='time', combine='nested')
+
+
+	# adjustment of time; and constrain to the specified date range:
+	DS = DS.sortby(DS.time)
+
+	# check if time duplicates exist:
+	if np.any(np.diff(DS.time.values) == np.timedelta64(0, "ns")):
+		raise RuntimeError("It seems that the processed IASI data has some duplicates. Removing them has not yet been coded. Have fun.")
+	
+
+	# check how much of the dimension 'n_hits' is really needed: sufficient to check only one 
+	# of the variables with this second dimension because all others use this dimension similarly:
+	max_n_points = -1
+	n_hits_max = len(DS.n_hits)
+
+	# loop through all columns (n_hits dimension) and check if data still exists:
+	kk = 0
+	is_something_here = True		# will check if data is present at index kk of 
+									# dimension n_hits at any time step
+	while is_something_here and (kk < n_hits_max):
+		is_something_here = np.any(~np.isnan(DS['lat'].values[:,kk]))
+		if is_something_here: kk += 1
+
+	max_n_points = kk
+
+	# truncate the second dimension and removee time indices without data:
+	DS = DS.isel(n_hits=np.arange(max_n_points))
 
 	return DS
 
