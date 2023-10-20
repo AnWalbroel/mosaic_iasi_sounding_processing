@@ -8,8 +8,6 @@ import datetime as dt
 import os
 import glob
 import sys
-sys.path.insert(0, "/mnt/f/Studium_NIM/work/Codes/MOSAiC/")
-from data_tools import *
 from import_data import import_iasi_nc, import_PS_mastertrack
 
 import pdb
