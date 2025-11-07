@@ -8,6 +8,7 @@ import datetime as dt
 import os
 import glob
 import sys
+from tqdm import tqdm
 from import_data import import_iasi_nc, import_PS_mastertrack
 
 import pdb
@@ -71,7 +72,7 @@ for idx_folder, subfolder in enumerate(subfolders):
 	try:
 		set_dict['max_dt'] = np.max(np.diff(PS_DS.time.values)).astype("timedelta64[s]")*0.5
 	except ValueError:
-		pdb.set_trace()
+		continue
 	if set_dict['max_dt'] > np.timedelta64(1800, "s"):
 		set_dict['max_dt'] = np.timedelta64(1800, "s")
 
@@ -122,12 +123,7 @@ for idx_folder, subfolder in enumerate(subfolders):
 
 	# loop through PS track time:
 	IASI_2d_shape = IASI_DS.lat.shape
-	for k, ps_time in enumerate(PS_DS.time.values):
-
-		n_hatches = round(30*k/n_time_ps_track)
-		n_remain = 30 - n_hatches
-		print("\rLooping over Polarstern track time: [", "#"*n_hatches, ' '*n_remain, ']', f" {round(100.*k/n_time_ps_track)} %", 
-				sep='', end='', flush=True)
+	for k, ps_time in enumerate(tqdm(PS_DS.time.values, desc="Loop over Polarstern track time")):
 
 		# first, finde indices of IASI_DS that are within the spatial distance defined
 		# in the settings:
@@ -227,7 +223,7 @@ for idx_folder, subfolder in enumerate(subfolders):
 				'product_minor_version', 'format_major_version', 'format_minor_version']
 	for attr_ in attr_list: IASI_PS_DS.attrs[attr_] = IASI_DS.attrs[attr_]
 
-	datetime_utc = dt.datetime.utcnow()
+	datetime_utc = dt.datetime.now(dt.timezone.utc)
 	IASI_PS_DS.attrs['processing_date'] = datetime_utc.strftime("%Y-%m-%d %H:%M:%S")
 
 	# time encoding
@@ -240,8 +236,9 @@ for idx_folder, subfolder in enumerate(subfolders):
 	# Limit dataset to data-only time steps:
 	IASI_PS_DS = IASI_PS_DS.isel(time=(~np.isnan(IASI_PS_DS.lat.values[:,0])))
 	IASI_PS_DS.to_netcdf(path_output + f"MOSAiC_IASI_Polarstern_overlap_step1_{subfolder[-10:]}.nc", mode='w', format='NETCDF4')
-	IASI_PS_DS.close()
+	IASI_PS_DS = IASI_PS_DS.close()
 
 	# clear memory:
-	PS_DS.close()
+	PS_DS = PS_DS.close()
 	del IASI_PS_DS, PS_DS
+
