@@ -7,6 +7,8 @@ import os
 import glob
 import sys
 
+from met_tools import create_ICAO_std_atmosphere, Z_from_pres
+
 
 def import_iasi_nc(
     files):
