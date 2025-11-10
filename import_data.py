@@ -114,21 +114,28 @@ def import_iasi_step1(
     return DS
 
 
-def read_iasi_step2(path: str, date_range: np.ndarray, RS_DS: xr.Dataset):
+def read_iasi_step2(path: str, file_pattern: str, date_range: np.ndarray, pres_sfc=None, RS_DS=None):
     
     """
     Import IASI data for a specific date range that has been processed with manage_iasi.py AND 
     manage_iasi_step2.py. If radiosonde data (RS_DS) is provided, it will be used to compute a  
     height grid for IASI profile data, which is available on pressure levels only. The 
     radiosonde data must have xr.DataArrays of pressurve ("pres") on ("launch_time","height")
-    and height ("height") on ("height",) dimensions.
+    and height ("height") on ("height",) dimensions. Otherwise, please provide the surface
+    pressure (pres_sfc), which allows to mask pressure levels of the IASI data located below
+    the surface.
     
     Parameters:
     -----------
     path : str
         Full path of the IASI step2 data.
+    file_pattern : str
+        File pattern to apply a glob.glob search for files.
     date_range : np.ndarray
         Array of np.datetime64 objects covering all days of the date range.
+    pres_sfc : float or np.ndarray
+        Surface air pressure in Pa that can be used to improve the calculated height axis from the 
+        pressure levels.
     RS_DS : xr.Dataset
         Radiosonde dataset. Must contain xr.DataArrays of pressurve ("pres") on 
         ("launch_time","height") and height ("height") on ("height",) dimensions.
@@ -150,7 +157,7 @@ def read_iasi_step2(path: str, date_range: np.ndarray, RS_DS: xr.Dataset):
         """
         
         flag_okay = {'flag_fgcheck': np.full((len(DS.time),), False),
-                     'flag_retcheck': np.full((len(DS.time),), False)}
+                        'flag_retcheck': np.full((len(DS.time),), False)}
         for flag_value in ['flag_fgcheck', 'flag_retcheck']:
             for k in range(len(DS.time)):
                 nonnan_flag = ~np.isnan(DS[flag_value][k,:].values)
@@ -164,16 +171,16 @@ def read_iasi_step2(path: str, date_range: np.ndarray, RS_DS: xr.Dataset):
         flag_okay_ret_DA = xr.DataArray(flag_okay['flag_retcheck'], dims=['time'], coords={'time': (['time'], DS.time.values)})
         
         return flag_okay_fg_DA, flag_okay_ret_DA
-    
-    
+
+
     def get_iasi_quality_flags(DS: xr.Dataset):
         
         flag_okay_fg_DA, flag_okay_ret_DA = first_guess_and_OE_retrieval_flags(DS)
         flag_itconv = ~np.any(DS.flag_itconv < 5, axis=1)
         
         return flag_okay_fg_DA, flag_okay_ret_DA, flag_itconv
-    
-    
+
+
     def apply_flags_and_split_first_guess_and_OE(
         DS: xr.Dataset, 
         var: str,
@@ -190,32 +197,36 @@ def read_iasi_step2(path: str, date_range: np.ndarray, RS_DS: xr.Dataset):
         data_in_limits_mask = (DS[var] > reasonable_value_limits[0]) & (DS[var] < reasonable_value_limits[1])
         fg_data_in_limits_mask = (DS["fg_"+var] > reasonable_value_limits[0]) & (DS["fg_"+var] < reasonable_value_limits[1])
         iasi_data_okay = xr.where(data_in_limits_mask & flag_okay_ret_DA & flag_itconv,
-                                  x=DS[var], y=np.nan)
+                                    x=DS[var], y=np.nan)
         iasi_data_fg_okay = xr.where(fg_data_in_limits_mask & flag_okay_fg_DA,
-                                     x=DS["fg_"+var], y=np.nan)
+                                        x=DS["fg_"+var], y=np.nan)
         
         return iasi_data_okay, iasi_data_fg_okay
-    
-    
+
+
     def iasi_pressure_to_height_levels(
         iasi_data: xr.DataArray,
         iasi_data_fg: xr.DataArray,
         iasi_pres: np.ndarray,
         sonde_pres: xr.DataArray,
         sonde_height: xr.DataArray,
+        pres_sfc=None,
         ):
         
         sonde_pres_ip = sonde_pres.interp(launch_time=iasi_data.time)
         sonde_pres_ip = sonde_pres_ip.bfill(dim='time')
         sonde_pres_ip = sonde_pres_ip.ffill(dim='time')
         
+        if pres_sfc is None:
+            pres_sfc = np.nanmax(sonde_pres_ip, axis=-1)
+        
         iasi_hgt = np.full(iasi_data.shape, np.nan)
         iasi_data_temp = np.full(iasi_data.shape, np.nan)
         for k in range(iasi_data.shape[0]):
             iasi_hgt[k,:] = np.interp(iasi_pres, sonde_pres_ip[k,::-1], sonde_height.values[::-1],
-                                      left=np.nan, right=np.nan)
+                                        left=np.nan, right=np.nan)
             
-            idx_okay = np.where(iasi_pres <= np.nanmax(sonde_pres_ip[k,:]))[0]
+            idx_okay = np.where(iasi_pres <= pres_sfc[k])[0]
             iasi_data_temp[k,idx_okay] = iasi_data.values[k,idx_okay]
             
             if np.all(np.isnan(iasi_data_temp[k,idx_okay])):
@@ -224,15 +235,64 @@ def read_iasi_step2(path: str, date_range: np.ndarray, RS_DS: xr.Dataset):
         iasi_data[:] = iasi_data_temp
         
         return iasi_hgt, iasi_data
+
+
+    def create_geopot_height_axis(DS: xr.Dataset):
+        
+        """
+        Provides the geopotential height based on the IASI temperature and humidity profiles. However, 
+        it's recommended to use the height data computed from radiosonde pressure levels instead.
+        """
+        
+        iasi_z = Z_from_pres(DS.pressure_levels_temp.values, DS.temp.values, DS.q.values)
+        DS['Z'] = xr.DataArray(iasi_z, dims=DS.temp.dims, attrs={'long_name': "Geopotential height", 'units': 'm'})
+        
+        return DS
+
+
+    def generate_fake_radiosonde_data(time: np.ndarray):
+        
+        std_pres, std_hgt, std_temp, std_q = create_ICAO_std_atmosphere()
+        std_data = {'pres': std_pres, 'temp': std_temp, 'q': std_q}
+        RS_DS = xr.Dataset(coords={'launch_time': (['launch_time'], time),
+                                'height': (['height'], std_hgt)})
+        
+        n_time = len(time)
+        for var in ['pres', 'temp', 'q']:
+            RS_DS[var] = xr.DataArray(np.repeat(np.expand_dims(std_data[var], axis=0), n_time, axis=0), 
+                                    dims=['launch_time', 'height'])
+        
+        return RS_DS
+
+    def identify_files_daterange(path: str, daterange: np.ndarray, file_pattern=file_pattern):
+        
+        """    
+        Parameters:
+        -----------
+        path : str
+            Full path where files containing the data are located.
+        daterange : np.ndarray
+            Array of np.datetime64 indicating the date range.
+        """
+        
+        daterange = daterange.astype('datetime64[D]')
+    
+        files = list()
+        for date in daterange:
+            date_str = str(date).replace("-","")
+            file = glob.glob(path + file_pattern.replace("*",date_str))
+            if len(file) == 1:
+                files.append(file[0])
+        
+        return files
     
     
-    files = identify_files_daterange(path, daterange=date_range, file_pattern="PS149_IASI_Polarstern_overlap_*.nc")
+    files = identify_files_daterange(path, daterange=date_range, file_pattern=file_pattern)
     DS = xr.open_mfdataset(files, concat_dim='time', combine='nested').load()
     DS = DS.isel(time=(np.where(
         (~np.any(DS.flag_fgcheck > 511, axis=1)) & 
         (~np.any(DS.fg_qi_atmospheric_water_vapour > 3.95, axis=1))
         )[0]))
-    
     
     IASI_pres = {'temp': DS.pressure_levels_temp.values,      # height axis for temperature
                    'q': DS.pressure_levels_humidity.values}     # height axis for q
@@ -240,17 +300,22 @@ def read_iasi_step2(path: str, date_range: np.ndarray, RS_DS: xr.Dataset):
                                'q': (-0.1,0.1)}
     flag_okay_fg_DA, flag_okay_ret_DA, flag_itconv = get_iasi_quality_flags(DS)
     
+    if RS_DS is None:
+        RS_DS = generate_fake_radiosonde_data(DS.time.values)
+    
     for var in ['temp', 'q']:
         iasi_data, iasi_data_fg = apply_flags_and_split_first_guess_and_OE(DS, var, reasonable_value_limits[var],
                                                                            flag_okay_fg_DA, flag_okay_ret_DA, flag_itconv)
         
         iasi_hgt, iasi_data = iasi_pressure_to_height_levels(iasi_data, iasi_data_fg, IASI_pres[var], 
-                                                             RS_DS.pres, RS_DS.height)
+                                                             RS_DS.pres, RS_DS.height, pres_sfc=pres_sfc)
         
         DS[var] = iasi_data
         DS['height_'+var] = xr.DataArray(iasi_hgt, dims=['time', 'nl'+var[0]])
+    
 
     DS = DS.sel(nlt=DS.nlt[::-1], nlq=DS.nlq[::-1])     # surface shall be index 0
+    DS = create_geopot_height_axis(DS)
     
     return DS
 
